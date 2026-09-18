@@ -19,6 +19,33 @@ ASTRASHIP_FELIX_COMMAND="felix-server --stdio" uv run astraship kernel check
 ASTRASHIP_FELIX_COMMAND="felix-server --stdio" uv run astraship run --prompt "hello"
 ```
 
+## Tool Runtime
+
+Astraship exposes a guarded Python tool registry independently of Felix. Tool schemas are validated before registration, calls are checked before dispatch, and results are normalized into stable success or error values. Built-in file tools are explicitly scoped to a workspace.
+
+```python
+import asyncio
+from pathlib import Path
+
+from astraship.tools import ToolCall, ToolContext, ToolRegistry, builtin_file_tools
+
+
+async def main() -> None:
+    registry = ToolRegistry()
+    for tool in builtin_file_tools():
+        registry.register(tool)
+    result = await registry.execute(
+        ToolCall("read-1", "read_file", {"path": "README.md"}),
+        ToolContext(Path.cwd()),
+    )
+    print(result.output if not result.is_error else result.error)
+
+
+asyncio.run(main())
+```
+
+The registry is the platform capability seam for future MCP and Felix tool-call adapters. Felix remains the agent kernel; Astraship does not embed or implement that kernel.
+
 **下一代智能体操作系统**
 
 Astraship 是一个面向 AI Agent 的操作系统级框架，为智能体提供完整的运行环境、工具生态和协作机制。
