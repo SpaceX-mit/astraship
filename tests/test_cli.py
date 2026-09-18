@@ -48,3 +48,20 @@ def test_kernel_check_reports_failure_without_traceback() -> None:
     assert result.stdout == ""
     assert result.stderr.startswith("astraship: ")
     assert "Traceback" not in result.stderr
+
+
+def test_run_prints_mock_assistant_response() -> None:
+    fixture = Path(__file__).parent / "fixtures" / "fake_felix.py"
+    command = f'{sys.executable} "{fixture}" --mode session'
+    result = subprocess.run(
+        [sys.executable, "-m", "astraship.cli", "run", "--prompt", "hello"],
+        cwd=Path(__file__).parents[1],
+        env={"PYTHONPATH": "src", "ASTRASHIP_FELIX_COMMAND": command},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "mock: hello"
+    assert result.stderr == ""

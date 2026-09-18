@@ -16,6 +16,7 @@ Astraship starts Felix as a separate process over newline-delimited JSON-RPC. Se
 
 ```bash
 ASTRASHIP_FELIX_COMMAND="felix-server --stdio" uv run astraship kernel check
+ASTRASHIP_FELIX_COMMAND="felix-server --stdio" uv run astraship run --prompt "hello"
 ```
 
 **下一代智能体操作系统**
@@ -32,14 +33,11 @@ Astraship 是一个面向 AI Agent 的操作系统级框架，为智能体提供
 ## 快速开始
 
 ```bash
-# 安装 Astraship CLI
-npm install -g astraship
+# 安装开发环境
+uv sync
 
-# 创建新的 Agent 项目
-astraship init my-agent
-
-# 运行 Agent
-astraship run
+# 运行一个 prompt
+ASTRASHIP_FELIX_COMMAND="felix-server --stdio" uv run astraship run --prompt "hello"
 ```
 
 ## 文档

@@ -48,6 +48,7 @@ class FelixClient:
         self._process_task: asyncio.Task[None] | None = None
         self._pending: dict[int | str, _Pending] = {}
         self._notifications: asyncio.Queue[Notification] = asyncio.Queue()
+        self._notification_subscribers: set[asyncio.Queue[Notification]] = set()
         self._stderr_tail: deque[str] = deque(maxlen=config.stderr_tail_lines)
         self._next_id = 1
         self._started = False
@@ -130,6 +131,22 @@ class FelixClient:
 
         self._require_initialized()
         return await self._notifications.get()
+
+    def subscribe_notifications(self, maxsize: int = 0) -> asyncio.Queue[Notification]:
+        """Create a broadcast notification queue owned by the caller."""
+
+        if self._closed:
+            raise KernelStateError("kernel client is closed")
+        if maxsize < 0:
+            raise ValueError("maxsize cannot be negative")
+        queue: asyncio.Queue[Notification] = asyncio.Queue(maxsize=maxsize)
+        self._notification_subscribers.add(queue)
+        return queue
+
+    def unsubscribe_notifications(self, queue: asyncio.Queue[Notification]) -> None:
+        """Remove a previously created notification subscription."""
+
+        self._notification_subscribers.discard(queue)
 
     async def close(self) -> None:
         """Close, terminate, and reap Felix; safe to call repeatedly."""
@@ -218,6 +235,12 @@ class FelixClient:
                         pending.future.set_result(message)
                 elif isinstance(message, Notification):
                     await self._notifications.put(message)
+                    for queue in tuple(self._notification_subscribers):
+                        try:
+                            queue.put_nowait(message)
+                        except asyncio.QueueFull:
+                            # The session consumer owns overflow reporting.
+                            pass
                 elif isinstance(message, ServerRequest):
                     await self._send_error(message)
             # Process watcher owns EOF failure reporting so exit code and stderr are retained.

@@ -9,6 +9,7 @@ import sys
 from .config import KernelConfig
 from .errors import AstrashipError
 from .kernel.client import FelixClient
+from .session import KernelSession
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -19,6 +20,8 @@ def build_parser() -> argparse.ArgumentParser:
     kernel = subparsers.add_parser("kernel", help="inspect the Felix kernel")
     kernel_subparsers = kernel.add_subparsers(dest="kernel_command")
     kernel_subparsers.add_parser("check", help="negotiate with Felix and report its version")
+    run = subparsers.add_parser("run", help="run one prompt through Felix")
+    run.add_argument("--prompt", required=True, help="user prompt")
     return parser
 
 
@@ -32,6 +35,23 @@ async def _kernel_check() -> int:
     return 0
 
 
+async def _run_prompt(content: str) -> int:
+    async with FelixClient(KernelConfig()) as client:
+        session = await KernelSession.create(client)
+        try:
+            await session.prompt(content)
+            async for event in session.events():
+                if event.type == "assistant/message":
+                    assistant_content = event.data.get("content")
+                    if isinstance(assistant_content, str):
+                        print(assistant_content)
+                if event.type == "turn/end":
+                    break
+        finally:
+            await session.close()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the Astraship CLI and return an exit status."""
 
@@ -39,6 +59,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "kernel" and args.kernel_command == "check":
         try:
             return asyncio.run(_kernel_check())
+        except AstrashipError as exc:
+            print(f"astraship: {exc}", file=sys.stderr)
+            return 1
+    if args.command == "run":
+        try:
+            return asyncio.run(_run_prompt(args.prompt))
         except AstrashipError as exc:
             print(f"astraship: {exc}", file=sys.stderr)
             return 1

@@ -12,10 +12,20 @@ def send(message: object) -> None:
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "--mode",
-    choices=("normal", "wrong-version", "malformed", "exit", "timeout"),
+    choices=(
+        "normal",
+        "wrong-version",
+        "malformed",
+        "exit",
+        "timeout",
+        "session",
+        "bad-session",
+    ),
     default="normal",
 )
 args = parser.parse_args()
+sessions = {}
+next_session = 1
 
 for raw_line in sys.stdin:
     if not raw_line.strip():
@@ -40,6 +50,81 @@ for raw_line in sys.stdin:
                 },
             }
         )
+    elif method == "session/new":
+        if args.mode == "bad-session":
+            send({"jsonrpc": "2.0", "id": request["id"], "result": {"wrong": True}})
+        else:
+            session_id = f"s-{next_session}"
+            next_session += 1
+            sessions[session_id] = 0
+            send({"jsonrpc": "2.0", "id": request["id"], "result": {"sessionId": session_id}})
+    elif method == "session/prompt":
+        params = request.get("params", {})
+        session_id = params.get("sessionId")
+        content = params.get("content")
+        if session_id not in sessions:
+            send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "error": {"code": -32010, "message": "unknown session"},
+                }
+            )
+            continue
+        sessions[session_id] += 1
+        message_id = f"m-{sessions[session_id]}"
+        send(
+            {
+                "jsonrpc": "2.0",
+                "method": "session.event",
+                "params": {
+                    "sessionId": session_id,
+                    "event": {
+                        "type": "user/message",
+                        "data": {"messageId": message_id, "content": content},
+                    },
+                },
+            }
+        )
+        if sessions[session_id] == 1:
+            send(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "session.event",
+                    "params": {
+                        "sessionId": session_id,
+                        "event": {"type": "future/event", "data": {"value": True}},
+                    },
+                }
+            )
+        send(
+            {
+                "jsonrpc": "2.0",
+                "method": "session.event",
+                "params": {
+                    "sessionId": session_id,
+                    "event": {
+                        "type": "assistant/message",
+                        "data": {"messageId": f"a-{message_id}", "content": f"mock: {content}"},
+                    },
+                },
+            }
+        )
+        send(
+            {
+                "jsonrpc": "2.0",
+                "method": "session.event",
+                "params": {
+                    "sessionId": session_id,
+                    "event": {"type": "turn/end", "data": {"messageId": message_id}},
+                },
+            }
+        )
+        send({"jsonrpc": "2.0", "id": request["id"], "result": {"messageId": message_id}})
+    elif method == "session/close":
+        session_id = request.get("params", {}).get("sessionId")
+        sessions.pop(session_id, None)
+        send({"jsonrpc": "2.0", "id": request["id"], "result": {}})
     elif method == "delayed":
         time.sleep(0.2)
         send({"jsonrpc": "2.0", "id": request["id"], "result": "late"})

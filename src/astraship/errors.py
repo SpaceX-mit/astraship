@@ -41,3 +41,11 @@ class KernelRemoteError(KernelProtocolError):
         self.code = code
         self.message = message
         self.data = data
+
+
+class SessionStateError(AstrashipError):
+    """A session operation is invalid for its current state."""
+
+
+class SessionOverflowError(AstrashipError):
+    """A session event queue filled before its consumer drained it."""
