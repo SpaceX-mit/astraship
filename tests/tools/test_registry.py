@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from astraship.errors import ToolRegistrationError
+from astraship.errors import ToolCallError, ToolRegistrationError
 from astraship.tools import (
     ToolCall,
     ToolContext,
@@ -190,3 +190,119 @@ async def test_observer_sees_final_result_once_and_cannot_replace_it(tmp_path: P
 def test_registry_rejects_non_positive_limits(kwargs: dict[str, object]) -> None:
     with pytest.raises(ValueError):
         ToolRegistry(**kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_execute_many_returns_submission_order_despite_completion_order(
+    tmp_path: Path,
+) -> None:
+    async def delayed(arguments: Mapping[str, Any], tool_context: ToolContext) -> object:
+        await asyncio.sleep(float(arguments["delay"]))
+        return {"value": arguments["value"]}
+
+    parameters = {
+        "type": "object",
+        "properties": {
+            "value": {"type": "integer"},
+            "delay": {"type": "number", "minimum": 0},
+        },
+        "required": ["value", "delay"],
+        "additionalProperties": False,
+    }
+    registry = ToolRegistry(max_concurrency=2)
+    registry.register(definition("delayed", delayed, parameters=parameters, concurrency_safe=True))
+
+    results = await registry.execute_many(
+        [
+            ToolCall("slow", "delayed", {"value": 1, "delay": 0.03}),
+            ToolCall("fast", "delayed", {"value": 2, "delay": 0}),
+        ],
+        context(tmp_path),
+    )
+
+    assert [result.call_id for result in results] == ["slow", "fast"]
+    assert [result.output for result in results] == [{"value": 1}, {"value": 2}]
+
+
+@pytest.mark.asyncio
+async def test_safe_batch_obeys_max_concurrency(tmp_path: Path) -> None:
+    active = 0
+    peak = 0
+
+    async def measured(arguments: Mapping[str, Any], tool_context: ToolContext) -> object:
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return {}
+
+    registry = ToolRegistry(max_concurrency=2)
+    registry.register(definition("safe", measured, concurrency_safe=True))
+    calls = [ToolCall(f"c{index}", "safe", {"value": index}) for index in range(5)]
+
+    await registry.execute_many(calls, context(tmp_path))
+
+    assert peak == 2
+
+
+@pytest.mark.asyncio
+async def test_duplicate_batch_ids_fail_before_dispatch(tmp_path: Path) -> None:
+    dispatched = False
+
+    async def body(arguments: Mapping[str, Any], tool_context: ToolContext) -> object:
+        nonlocal dispatched
+        dispatched = True
+        return {}
+
+    registry = ToolRegistry()
+    registry.register(definition("body", body, concurrency_safe=True))
+
+    with pytest.raises(ToolCallError, match="duplicate.*c1"):
+        await registry.execute_many(
+            [
+                ToolCall("c1", "body", {"value": 1}),
+                ToolCall("c1", "body", {"value": 2}),
+            ],
+            context(tmp_path),
+        )
+    assert not dispatched
+
+
+@pytest.mark.asyncio
+async def test_unsafe_calls_are_exclusive_in_batch_order(tmp_path: Path) -> None:
+    active: set[str] = set()
+    overlaps: list[tuple[str, tuple[str, ...]]] = []
+    starts: list[str] = []
+
+    async def tracked(arguments: Mapping[str, Any], tool_context: ToolContext) -> object:
+        label = str(arguments["label"])
+        starts.append(label)
+        if active:
+            overlaps.append((label, tuple(sorted(active))))
+        active.add(label)
+        await asyncio.sleep(0.01)
+        active.remove(label)
+        return {"label": label}
+
+    parameters = {
+        "type": "object",
+        "properties": {"label": {"type": "string"}},
+        "required": ["label"],
+        "additionalProperties": False,
+    }
+    registry = ToolRegistry(max_concurrency=3)
+    registry.register(definition("safe", tracked, parameters=parameters, concurrency_safe=True))
+    registry.register(definition("unsafe", tracked, parameters=parameters, concurrency_safe=False))
+
+    await registry.execute_many(
+        [
+            ToolCall("c1", "safe", {"label": "safe-before"}),
+            ToolCall("c2", "unsafe", {"label": "unsafe"}),
+            ToolCall("c3", "safe", {"label": "safe-after"}),
+        ],
+        context(tmp_path),
+    )
+
+    assert overlaps == []
+    assert starts == ["safe-before", "unsafe", "safe-after"]
