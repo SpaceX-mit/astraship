@@ -67,3 +67,31 @@ def test_append_writes_jsonl_record(tmp_path: Path) -> None:
         "type": "assistant/message",
         "data": {"content": "hello"},
     }
+
+
+def test_query_filters_and_paginates_events(tmp_path: Path) -> None:
+    store = JsonlSessionStore(tmp_path)
+    store.append(event("s-1", "user/message", "one"))
+    store.append(event("s-1", "assistant/message", "two"))
+    store.append(event("s-1", "assistant/message", "three"))
+
+    assert store.query("s-1", event_type="assistant/message") == [
+        event("s-1", "assistant/message", "two"),
+        event("s-1", "assistant/message", "three"),
+    ]
+    assert store.query("s-1", offset=1, limit=1) == [event("s-1", "assistant/message", "two")]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"event_type": ""},
+        {"offset": -1},
+        {"offset": True},
+        {"limit": 0},
+        {"limit": True},
+    ],
+)
+def test_query_rejects_invalid_filters(tmp_path: Path, kwargs: dict[str, object]) -> None:
+    with pytest.raises(SessionPersistenceError):
+        JsonlSessionStore(tmp_path).query("s-1", **kwargs)  # type: ignore[arg-type]

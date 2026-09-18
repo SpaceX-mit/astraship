@@ -105,6 +105,30 @@ class JsonlSessionStore:
             path.stem for path in paths if path.is_file() and _is_safe_session_id(path.stem)
         )
 
+    def query(
+        self,
+        session_id: str,
+        *,
+        event_type: str | None = None,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> list[SessionEvent]:
+        """Return a filtered page from one strictly validated transcript."""
+
+        if event_type is not None and not event_type:
+            raise SessionPersistenceError("event type filter must be non-empty")
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise SessionPersistenceError("query offset must be a non-negative integer")
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
+        ):
+            raise SessionPersistenceError("query limit must be a positive integer")
+        events = self.read(session_id)
+        if event_type is not None:
+            events = [event for event in events if event.type == event_type]
+        end = None if limit is None else offset + limit
+        return events[offset:end]
+
     def _path(self, session_id: str) -> Path:
         return self._root / f"{session_id}.jsonl"
 
