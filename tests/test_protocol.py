@@ -9,7 +9,9 @@ from astraship.kernel.protocol import (
     Response,
     ServerRequest,
     decode_message,
+    encode_error_response,
     encode_request,
+    encode_result_response,
 )
 
 
@@ -17,6 +19,31 @@ def test_encode_request_emits_one_json_rpc_line() -> None:
     assert encode_request(7, "initialize", {"protocolVersion": 1}) == (
         '{"jsonrpc":"2.0","id":7,"method":"initialize","params":{"protocolVersion":1}}\n'
     )
+
+
+def test_encode_result_response_emits_one_json_rpc_line() -> None:
+    assert encode_result_response("tool-1", {"ok": True}) == (
+        '{"jsonrpc":"2.0","id":"tool-1","result":{"ok":true}}\n'
+    )
+
+
+def test_encode_error_response_includes_optional_data() -> None:
+    assert encode_error_response(3, -32602, "Invalid params", {"field": "name"}) == (
+        '{"jsonrpc":"2.0","id":3,"error":{"code":-32602,'
+        '"message":"Invalid params","data":{"field":"name"}}}\n'
+    )
+
+
+@pytest.mark.parametrize("request_id", [True, None, 1.5])
+def test_response_encoders_reject_invalid_request_ids(request_id: object) -> None:
+    with pytest.raises(KernelProtocolError, match="request ID"):
+        encode_result_response(request_id, None)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("value", [float("nan"), {"bad": object()}])
+def test_response_encoders_reject_non_json_results(value: object) -> None:
+    with pytest.raises(KernelProtocolError, match="JSON-compatible"):
+        encode_result_response(1, value)
 
 
 def test_decode_success_response() -> None:

@@ -44,7 +44,27 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-The registry is the platform capability seam for future MCP and Felix tool-call adapters. Felix remains the agent kernel; Astraship does not embed or implement that kernel.
+The registry is the platform capability seam for future MCP integrations and
+the Felix host-tool adapter below. Felix remains the agent kernel; Astraship
+does not embed or implement that kernel.
+
+When the Felix host-tool request API is enabled, the adapter wires the same
+registry into the stdio client:
+
+    from astraship.kernel.client import FelixClient
+    from astraship.kernel.host_tools import HostToolAdapter
+
+    adapter = HostToolAdapter(registry, ToolContext(Path.cwd()))
+    client = FelixClient(
+        config,
+        capabilities=adapter.capability(),
+        request_handlers=adapter.handlers(),
+    )
+
+This client-side adapter is tested against a deterministic protocol fixture.
+The real felix-server must implement
+felix/docs/design/api/0003-host-tool-execution.md before this wiring is used
+in production.
 
 **下一代智能体操作系统**
 

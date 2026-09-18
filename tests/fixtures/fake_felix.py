@@ -46,7 +46,14 @@ for raw_line in sys.stdin:
                 "result": {
                     "protocolVersion": 2 if args.mode == "wrong-version" else 1,
                     "serverInfo": {"name": "fake-felix", "version": "9.8.7"},
-                    "capabilities": {"fixture": True},
+                    "capabilities": {
+                        "fixture": True,
+                        **(
+                            {"hostTools": {"version": 1}}
+                            if "hostTools" in request.get("params", {}).get("capabilities", {})
+                            else {}
+                        ),
+                    },
                 },
             }
         )
@@ -147,6 +154,63 @@ for raw_line in sys.stdin:
         send({"jsonrpc": "2.0", "id": "server-1", "method": "client.unknown"})
         response = json.loads(sys.stdin.readline())
         send({"jsonrpc": "2.0", "id": request["id"], "result": response["error"]["code"]})
+    elif method == "server-execute":
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": "tool-1",
+                "method": "tool/execute",
+                "params": request.get("params"),
+            }
+        )
+        response = json.loads(sys.stdin.readline())
+        send({"jsonrpc": "2.0", "id": request["id"], "result": response})
+    elif method == "server-concurrent":
+        send({"jsonrpc": "2.0", "id": "slow", "method": "fixture/slow"})
+        send({"jsonrpc": "2.0", "id": "fast", "method": "fixture/fast"})
+        first = json.loads(sys.stdin.readline())
+        second = json.loads(sys.stdin.readline())
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "result": [first, second],
+            }
+        )
+    elif method == "server-cancel":
+        send({"jsonrpc": "2.0", "id": "cancel-me", "method": "fixture/hang"})
+        send(
+            {
+                "jsonrpc": "2.0",
+                "method": "$/cancelRequest",
+                "params": {"id": "cancel-me"},
+            }
+        )
+        response = json.loads(sys.stdin.readline())
+        send({"jsonrpc": "2.0", "id": request["id"], "result": response})
+    elif method == "server-cancel-running":
+        send({"jsonrpc": "2.0", "id": "cancel-running", "method": "fixture/hang"})
+        time.sleep(0.05)
+        send(
+            {
+                "jsonrpc": "2.0",
+                "method": "$/cancelRequest",
+                "params": {"id": "cancel-running"},
+            }
+        )
+        response = json.loads(sys.stdin.readline())
+        send({"jsonrpc": "2.0", "id": request["id"], "result": response})
+    elif method == "server-duplicate":
+        send({"jsonrpc": "2.0", "id": "duplicate", "method": "fixture/hang"})
+        time.sleep(0.05)
+        send({"jsonrpc": "2.0", "id": "duplicate", "method": "client.unknown"})
+        response = json.loads(sys.stdin.readline())
+        send({"jsonrpc": "2.0", "id": request["id"], "result": response})
+    elif method == "server-hang":
+        send({"jsonrpc": "2.0", "id": "close-me", "method": "fixture/hang"})
+        response_line = sys.stdin.readline()
+        if response_line:
+            send({"jsonrpc": "2.0", "id": request["id"], "result": json.loads(response_line)})
     elif method == "exit":
         print("requested fixture exit", file=sys.stderr, flush=True)
         raise SystemExit(17)

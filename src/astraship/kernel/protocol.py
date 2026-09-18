@@ -82,16 +82,36 @@ def encode_request(request_id: RequestId, method: str, params: JsonValue = None)
     return json.dumps(payload, separators=(",", ":"), ensure_ascii=False) + "\n"
 
 
-def encode_error_response(request_id: RequestId, code: int, message: str) -> str:
+def encode_result_response(request_id: RequestId, result: JsonValue) -> str:
+    """Encode a JSON-RPC result response for a server-initiated request."""
+
+    return _encode_response({"jsonrpc": "2.0", "id": request_id, "result": result})
+
+
+def encode_error_response(
+    request_id: RequestId, code: int, message: str, data: JsonValue = None
+) -> str:
     """Encode a JSON-RPC error response for a server-initiated request."""
 
-    return (
-        json.dumps(
-            {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}},
-            separators=(",", ":"),
+    if not isinstance(code, int) or isinstance(code, bool):
+        raise KernelProtocolError("error code must be an integer")
+    if not isinstance(message, str):
+        raise KernelProtocolError("error message must be a string")
+    error: dict[str, JsonValue] = {"code": code, "message": message}
+    if data is not None:
+        error["data"] = data
+    return _encode_response({"jsonrpc": "2.0", "id": request_id, "error": error})
+
+
+def _encode_response(payload: dict[str, JsonValue]) -> str:
+    if not _valid_request_id(payload["id"]):
+        raise KernelProtocolError("request ID must be a string or integer")
+    try:
+        return (
+            json.dumps(payload, separators=(",", ":"), ensure_ascii=False, allow_nan=False) + "\n"
         )
-        + "\n"
-    )
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise KernelProtocolError("response must be JSON-compatible") from exc
 
 
 def decode_message(line: str) -> Response | Notification | ServerRequest:

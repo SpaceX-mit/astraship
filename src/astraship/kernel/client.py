@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections import deque
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 from .. import __version__
@@ -18,6 +21,7 @@ from ..errors import (
     KernelTimeoutError,
     KernelVersionMismatchError,
 )
+from .host_tools import InvalidRequestParams, RequestHandler
 from .protocol import (
     PROTOCOL_VERSION,
     InitializeResult,
@@ -28,6 +32,7 @@ from .protocol import (
     decode_message,
     encode_error_response,
     encode_request,
+    encode_result_response,
 )
 
 
@@ -40,13 +45,26 @@ class _Pending:
 class FelixClient:
     """Own a Felix child process and its versioned JSON-RPC connection."""
 
-    def __init__(self, config: KernelConfig) -> None:
+    def __init__(
+        self,
+        config: KernelConfig,
+        *,
+        capabilities: Mapping[str, Any] | None = None,
+        request_handlers: Mapping[str, RequestHandler] | None = None,
+    ) -> None:
         self._config = config
+        self._capabilities = _snapshot_capabilities(capabilities)
+        self._request_handlers = dict(request_handlers or {})
         self._process: asyncio.subprocess.Process | None = None
         self._stdout_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._process_task: asyncio.Task[None] | None = None
         self._pending: dict[int | str, _Pending] = {}
+        self._server_tasks: dict[int | str, asyncio.Task[None]] = {}
+        self._execution_tasks: dict[int | str, asyncio.Future[Any]] = {}
+        self._response_tasks: set[asyncio.Task[None]] = set()
+        self._cancelled_server_requests: set[int | str] = set()
+        self._write_lock = asyncio.Lock()
         self._notifications: asyncio.Queue[Notification] = asyncio.Queue()
         self._notification_subscribers: set[asyncio.Queue[Notification]] = set()
         self._stderr_tail: deque[str] = deque(maxlen=config.stderr_tail_lines)
@@ -103,7 +121,7 @@ class FelixClient:
                 {
                     "protocolVersion": PROTOCOL_VERSION,
                     "clientInfo": {"name": "astraship", "version": __version__},
-                    "capabilities": {},
+                    "capabilities": self._capabilities,
                 },
             )
             self._initialize_result = _parse_initialize_result(response)
@@ -154,6 +172,16 @@ class FelixClient:
         if self._closed:
             return
         self._closed = True
+        server_tasks = (*self._server_tasks.values(), *self._response_tasks)
+        for task in server_tasks:
+            if not task.done():
+                task.cancel()
+        for task in server_tasks:
+            with suppress(asyncio.CancelledError, Exception):
+                await task
+        self._server_tasks.clear()
+        self._execution_tasks.clear()
+        self._response_tasks.clear()
         process = self._process
         if process is not None and process.stdin is not None:
             process.stdin.close()
@@ -169,13 +197,13 @@ class FelixClient:
                 await process.wait()
         failure = self._failure or KernelProcessError("Felix kernel client closed")
         self._fail_pending(failure)
-        for task in (self._stdout_task, self._stderr_task, self._process_task):
-            if task is not None and not task.done():
-                task.cancel()
-        for task in (self._stdout_task, self._stderr_task, self._process_task):
-            if task is not None:
+        for transport_task in (self._stdout_task, self._stderr_task, self._process_task):
+            if transport_task is not None and not transport_task.done():
+                transport_task.cancel()
+        for transport_task in (self._stdout_task, self._stderr_task, self._process_task):
+            if transport_task is not None:
                 with suppress(asyncio.CancelledError, Exception):
-                    await task
+                    await transport_task
 
     async def _request(self, method: str, params: Any) -> Any:
         if self._process is None or self._process.stdin is None:
@@ -186,8 +214,7 @@ class FelixClient:
         future: asyncio.Future[Response] = loop.create_future()
         self._pending[request_id] = _Pending(future=future, method=method)
         try:
-            self._process.stdin.write(encode_request(request_id, method, params).encode())
-            await self._process.stdin.drain()
+            await self._write(encode_request(request_id, method, params))
             if self._process_task is None:
                 response = await asyncio.wait_for(future, self._config.request_timeout)
             else:
@@ -234,15 +261,18 @@ class FelixClient:
                     if pending is not None and not pending.future.done():
                         pending.future.set_result(message)
                 elif isinstance(message, Notification):
-                    await self._notifications.put(message)
-                    for queue in tuple(self._notification_subscribers):
-                        try:
-                            queue.put_nowait(message)
-                        except asyncio.QueueFull:
-                            # The session consumer owns overflow reporting.
-                            pass
+                    if message.method == "$/cancelRequest":
+                        self._cancel_server_request(message)
+                    else:
+                        await self._notifications.put(message)
+                        for queue in tuple(self._notification_subscribers):
+                            try:
+                                queue.put_nowait(message)
+                            except asyncio.QueueFull:
+                                # The session consumer owns overflow reporting.
+                                pass
                 elif isinstance(message, ServerRequest):
-                    await self._send_error(message)
+                    self._dispatch_server_request(message)
             # Process watcher owns EOF failure reporting so exit code and stderr are retained.
         except asyncio.CancelledError:
             raise
@@ -259,13 +289,133 @@ class FelixClient:
         except asyncio.CancelledError:
             raise
 
-    async def _send_error(self, message: ServerRequest) -> None:
-        if self._process is None or self._process.stdin is None or self._closed:
+    def _dispatch_server_request(self, message: ServerRequest) -> None:
+        if message.request_id in self._server_tasks:
+            task = asyncio.create_task(
+                self._send_error(message.request_id, -32600, "Invalid Request")
+            )
+            self._response_tasks.add(task)
+            task.add_done_callback(self._response_task_done)
             return
-        self._process.stdin.write(
-            encode_error_response(message.request_id, -32601, "Method not found").encode()
-        )
-        await self._process.stdin.drain()
+        task = asyncio.create_task(self._handle_server_request(message))
+        self._server_tasks[message.request_id] = task
+        task.add_done_callback(partial(self._server_task_done, message.request_id))
+
+    async def _handle_server_request(self, message: ServerRequest) -> None:
+        if message.request_id in self._cancelled_server_requests:
+            await self._send_error(message.request_id, -32800, "Request cancelled")
+            return
+        handler = self._request_handlers.get(message.method)
+        if handler is None:
+            await self._send_error(
+                message.request_id, -32601, "Method not found", honor_cancellation=True
+            )
+            return
+        execution: asyncio.Future[Any] = asyncio.ensure_future(handler(message))
+        self._execution_tasks[message.request_id] = execution
+        try:
+            result = await execution
+        except InvalidRequestParams as exc:
+            await self._send_error(
+                message.request_id,
+                -32602,
+                "Invalid params",
+                str(exc),
+                honor_cancellation=True,
+            )
+        except asyncio.CancelledError:
+            if self._closed:
+                raise
+            await self._send_error(message.request_id, -32800, "Request cancelled")
+        except Exception:
+            await self._send_error(
+                message.request_id, -32603, "Internal error", honor_cancellation=True
+            )
+        else:
+            try:
+                response = encode_result_response(message.request_id, result)
+            except KernelProtocolError:
+                await self._send_error(
+                    message.request_id, -32603, "Internal error", honor_cancellation=True
+                )
+            else:
+                await self._write_final_response(message.request_id, response)
+        finally:
+            if self._execution_tasks.get(message.request_id) is execution:
+                self._execution_tasks.pop(message.request_id, None)
+
+    def _cancel_server_request(self, message: Notification) -> None:
+        params = message.params
+        if not isinstance(params, dict):
+            return
+        request_id = params.get("id")
+        if not isinstance(request_id, (str, int)) or isinstance(request_id, bool):
+            return
+        task = self._server_tasks.get(request_id)
+        if task is not None and not task.done():
+            if request_id in self._cancelled_server_requests:
+                return
+            self._cancelled_server_requests.add(request_id)
+            execution = self._execution_tasks.get(request_id)
+            if execution is not None and not execution.done():
+                execution.cancel()
+
+    def _server_task_done(self, request_id: int | str, task: asyncio.Task[None]) -> None:
+        if self._server_tasks.get(request_id) is task:
+            self._server_tasks.pop(request_id, None)
+        self._execution_tasks.pop(request_id, None)
+        self._cancelled_server_requests.discard(request_id)
+        if task.cancelled():
+            return
+        failure = task.exception()
+        self._handle_server_task_failure(failure)
+
+    def _response_task_done(self, task: asyncio.Task[None]) -> None:
+        self._response_tasks.discard(task)
+        if task.cancelled():
+            return
+        self._handle_server_task_failure(task.exception())
+
+    def _handle_server_task_failure(self, failure: BaseException | None) -> None:
+        if failure is not None and not self._closed:
+            if not isinstance(failure, (KernelProtocolError, KernelProcessError)):
+                failure = KernelProcessError(str(failure))
+            self._set_failure(failure)
+            self._fail_pending(failure)
+
+    async def _send_error(
+        self,
+        request_id: int | str,
+        code: int,
+        message: str,
+        data: Any = None,
+        *,
+        honor_cancellation: bool = False,
+    ) -> None:
+        response = encode_error_response(request_id, code, message, data)
+        if honor_cancellation:
+            await self._write_final_response(request_id, response)
+        else:
+            await self._write(response)
+
+    async def _write(self, line: str) -> None:
+        async with self._write_lock:
+            stream = self._require_stdin()
+            stream.write(line.encode())
+            await stream.drain()
+
+    async def _write_final_response(self, request_id: int | str, line: str) -> None:
+        async with self._write_lock:
+            stream = self._require_stdin()
+            if request_id in self._cancelled_server_requests:
+                line = encode_error_response(request_id, -32800, "Request cancelled")
+            stream.write(line.encode())
+            await stream.drain()
+
+    def _require_stdin(self) -> asyncio.StreamWriter:
+        if self._process is None or self._process.stdin is None or self._closed:
+            raise KernelStateError("kernel process is not running")
+        return self._process.stdin
 
     async def _watch_process(self, process: asyncio.subprocess.Process) -> None:
         returncode = await process.wait()
@@ -330,3 +480,14 @@ def _parse_initialize_result(value: Any) -> InitializeResult:
         server_info=ServerInfo(name=name, version=version),
         capabilities=capabilities,
     )
+
+
+def _snapshot_capabilities(capabilities: Mapping[str, Any] | None) -> dict[str, Any]:
+    try:
+        encoded = json.dumps(dict(capabilities or {}), ensure_ascii=False, allow_nan=False)
+        value = json.loads(encoded)
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise KernelProtocolError("capabilities must be JSON-compatible") from exc
+    if not isinstance(value, dict):
+        raise KernelProtocolError("capabilities must be a JSON object")
+    return value
