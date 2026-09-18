@@ -1,5 +1,23 @@
 # Astraship Agent OS
 
+Astraship is a Python Agent OS platform that composes product capabilities around the Felix agent kernel.
+
+## Development
+
+Requirements: Python 3.12+ and [uv](https://docs.astral.sh/uv/).
+
+```bash
+uv sync
+uv run astraship --help
+uv run pytest
+```
+
+Astraship starts Felix as a separate process over newline-delimited JSON-RPC. Set `ASTRASHIP_FELIX_COMMAND` to the Felix server command, or configure `kernel.command` when embedding the client. The platform never downloads or bundles Felix.
+
+```bash
+ASTRASHIP_FELIX_COMMAND="felix-server --stdio" uv run astraship kernel check
+```
+
 **下一代智能体操作系统**
 
 Astraship 是一个面向 AI Agent 的操作系统级框架，为智能体提供完整的运行环境、工具生态和协作机制。
