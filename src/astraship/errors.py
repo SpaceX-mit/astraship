@@ -53,3 +53,11 @@ class SessionOverflowError(AstrashipError):
 
 class SessionPersistenceError(AstrashipError):
     """A session transcript could not be written or recovered."""
+
+
+class ToolRegistrationError(AstrashipError):
+    """A tool definition cannot be safely registered."""
+
+
+class ToolCallError(AstrashipError):
+    """A tool call or batch is structurally invalid."""
