@@ -5,8 +5,14 @@ from pathlib import Path
 import pytest
 
 from astraship.config import KernelConfig
-from astraship.errors import KernelProtocolError, SessionOverflowError, SessionStateError
+from astraship.errors import (
+    KernelProtocolError,
+    SessionOverflowError,
+    SessionPersistenceError,
+    SessionStateError,
+)
 from astraship.kernel.client import FelixClient
+from astraship.persistence import JsonlSessionStore
 from astraship.session import KernelSession, PromptReceipt, SessionEvent
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fake_felix.py"
@@ -101,5 +107,34 @@ async def test_small_event_queue_fails_instead_of_dropping_events() -> None:
         await session.prompt("hello")
         await asyncio.sleep(0.05)
         with pytest.raises(SessionOverflowError, match="overflow"):
+            await session.events().__anext__()
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_event_is_persisted_before_consumer_receives_it(tmp_path: Path) -> None:
+    store = JsonlSessionStore(tmp_path)
+    async with FelixClient(config()) as client:
+        session = await KernelSession.create(client, store=store)
+        await session.prompt("hello")
+        first = await session.events().__anext__()
+
+        persisted = store.read(session.session_id)
+        assert persisted
+        assert persisted[0] == first
+        await session.close()
+
+
+class FailingStore:
+    def append(self, event: SessionEvent) -> None:
+        raise SessionPersistenceError("disk full")
+
+
+@pytest.mark.asyncio
+async def test_persistence_failure_reaches_event_iterator() -> None:
+    async with FelixClient(config()) as client:
+        session = await KernelSession.create(client, store=FailingStore())
+        await session.prompt("hello")
+        with pytest.raises(SessionPersistenceError, match="disk full"):
             await session.events().__anext__()
         await session.close()

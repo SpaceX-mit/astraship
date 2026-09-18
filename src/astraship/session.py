@@ -6,11 +6,12 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from .errors import KernelProtocolError, SessionOverflowError, SessionStateError
 from .kernel.client import FelixClient
 from .kernel.protocol import Notification
+from .persistence import SessionStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,11 +39,13 @@ class KernelSession:
         session_id: str,
         event_queue: asyncio.Queue[Notification],
         event_queue_size: int,
+        store: SessionStore | None,
     ) -> None:
         self._client = client
         self.session_id = session_id
         self._event_queue = event_queue
         self._event_queue_size = event_queue_size
+        self._store = store
         self._events: asyncio.Queue[SessionEvent | BaseException] = asyncio.Queue(
             maxsize=event_queue_size
         )
@@ -51,7 +54,12 @@ class KernelSession:
         self._remote_closed = False
 
     @classmethod
-    async def create(cls, client: FelixClient, event_queue_size: int = 128) -> KernelSession:
+    async def create(
+        cls,
+        client: FelixClient,
+        event_queue_size: int = 128,
+        store: SessionStore | None = None,
+    ) -> KernelSession:
         """Create a remote session and start its event demultiplexer."""
 
         if event_queue_size <= 0:
@@ -64,7 +72,13 @@ class KernelSession:
             raise KernelProtocolError("session/new result requires non-empty sessionId")
         # Keep the transport subscription lossless; apply the bounded policy in the facade queue.
         queue = client.subscribe_notifications()
-        return cls(client, session_id, queue, event_queue_size)
+        return cls(client, session_id, queue, event_queue_size, store)
+
+    @staticmethod
+    def replay(store: SessionStoreWithRead, session_id: str) -> list[SessionEvent]:
+        """Replay a persisted transcript without contacting Felix."""
+
+        return store.read(session_id)
 
     async def prompt(self, content: str) -> PromptReceipt:
         """Enqueue a user prompt and return its durable message ID."""
@@ -116,6 +130,8 @@ class KernelSession:
                 event = _parse_event(notification.params)
                 if event.session_id != self.session_id:
                     continue
+                if self._store is not None:
+                    self._store.append(event)
                 try:
                     self._events.put_nowait(event)
                 except asyncio.QueueFull:
@@ -163,3 +179,10 @@ def _clear_queue(queue: asyncio.Queue[SessionEvent | BaseException]) -> None:
             queue.get_nowait()
         except asyncio.QueueEmpty:
             return
+
+
+class SessionStoreWithRead(SessionStore, Protocol):
+    """Session store extension used by transcript replay."""
+
+    def read(self, session_id: str) -> list[SessionEvent]:
+        """Read all events for one session."""

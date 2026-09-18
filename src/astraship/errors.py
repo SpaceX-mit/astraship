@@ -49,3 +49,7 @@ class SessionStateError(AstrashipError):
 
 class SessionOverflowError(AstrashipError):
     """A session event queue filled before its consumer drained it."""
+
+
+class SessionPersistenceError(AstrashipError):
+    """A session transcript could not be written or recovered."""
