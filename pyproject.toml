@@ -30,6 +30,7 @@ packages = ["src/astraship"]
 addopts = "-ra"
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = ["real_felix: starts a locally built Felix server without external services"]
 
 [tool.ruff]
 line-length = 100

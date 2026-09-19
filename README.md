@@ -61,10 +61,18 @@ registry into the stdio client:
         request_handlers=adapter.handlers(),
     )
 
-This client-side adapter is tested against a deterministic protocol fixture.
-The real felix-server must implement
-felix/docs/design/api/0003-host-tool-execution.md before this wiring is used
-in production.
+The adapter is covered both by deterministic protocol tests and by a real-process
+integration test. The latter builds `felix-server`, starts a local deterministic
+OpenAI-compatible HTTP fixture, and executes an actual workspace `read_file` call.
+It does not use an external service or API key:
+
+```bash
+ASTRASHIP_TEST_FELIX_REPO=../felix \
+  PYTHONPATH=src uv run pytest tests/integration/test_real_felix_host_tools.py -v
+```
+
+`ASTRASHIP_TEST_FELIX_REPO` is optional when the Felix and Astraship repositories
+are sibling directories.
 
 **下一代智能体操作系统**
 
